@@ -89,7 +89,7 @@
             </intent-filter>
         </activity>
         <activity
-            android:name=".NFCExampleActivity"
+            android:name=".NFCBreakingPaymentsActivity"
             android:label="@string/title_activity_nfc_example"
             android:launchMode="singleTop">
             <intent-filter>

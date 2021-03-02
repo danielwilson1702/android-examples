@@ -2,43 +2,46 @@ package com.clover.example.inventory;
 
 import android.accounts.Account;
 import android.app.AlertDialog;
+import android.app.ListActivity;
 import android.app.LoaderManager;
 import android.content.Context;
 import android.content.CursorLoader;
 import android.content.Loader;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.AsyncTask;
 import android.os.Bundle;
 import android.os.RemoteException;
+import android.util.Log;
 import android.view.View;
 import android.widget.ListView;
 import android.widget.SimpleCursorAdapter;
 import android.widget.TextView;
-import android.app.ListActivity;
-import android.util.Log;
-import android.os.AsyncTask;
 import android.widget.Toast;
 
 import com.clover.sdk.util.CloverAccount;
 import com.clover.sdk.v1.BindingException;
 import com.clover.sdk.v1.ClientException;
 import com.clover.sdk.v1.ForbiddenException;
+import com.clover.sdk.v1.ResultStatus;
+import com.clover.sdk.v1.ServiceConnector;
 import com.clover.sdk.v1.ServiceException;
-import com.clover.sdk.v3.inventory.InventoryContract;
 import com.clover.sdk.v1.merchant.Merchant;
 import com.clover.sdk.v1.merchant.MerchantConnector;
-import com.clover.sdk.v1.ServiceConnector;
-import com.clover.sdk.v1.ResultStatus;
+import com.clover.sdk.v1.printer.Category;
+import com.clover.sdk.v1.printer.Printer;
+import com.clover.sdk.v1.printer.PrinterConnector;
+import com.clover.sdk.v3.inventory.InventoryConnector;
+import com.clover.sdk.v3.inventory.InventoryContract;
 import com.clover.sdk.v3.inventory.ModifierGroup;
 import com.clover.sdk.v3.inventory.PriceType;
-import com.clover.sdk.v3.inventory.InventoryConnector;
-import com.clover.sdk.v3.inventory.TaxRate;
 import com.clover.sdk.v3.inventory.Tag;
+import com.clover.sdk.v3.inventory.TaxRate;
 
 import java.text.DecimalFormat;
 import java.text.NumberFormat;
-import java.util.Locale;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * In this example app, the Clover InventoryContract is used with a standard Android Loader to
@@ -61,6 +64,7 @@ public class InventoryExampleActivity extends ListActivity implements LoaderMana
     private static final int ITEM_LOADER_ID = 0;
     // Used for connection to Inventory Service
     private InventoryConnector inventoryConnector;
+    private PrinterConnector printerConnector;
     private boolean serviceIsBound = false;
     // Used for dialog box
     private String UUID;
@@ -75,7 +79,7 @@ public class InventoryExampleActivity extends ListActivity implements LoaderMana
         // Get a Clover Account
         mCloverAccount = CloverAccount.getAccount(context);
 
-        // Connect to Clover Inventory Service
+        // Connect to Clover Inventory / Printer Service
         connectToServiceConnector();
 
         // Create an empty adapter we will use to display the loaded data.
@@ -97,6 +101,7 @@ public class InventoryExampleActivity extends ListActivity implements LoaderMana
         Log.v(TAG, "Pausing...");
         mMerchantConnector.disconnect();
         inventoryConnector.disconnect();
+        printerConnector.disconnect();
         super.onPause();
     }
 
@@ -190,6 +195,19 @@ public class InventoryExampleActivity extends ListActivity implements LoaderMana
             }
         });
         inventoryConnector.connect();
+
+        printerConnector = new PrinterConnector(context, mCloverAccount, new ServiceConnector.OnServiceConnectedListener() {
+            @Override
+            public void onServiceConnected(ServiceConnector connector) {
+                serviceIsBound = true;
+            }
+
+            @Override
+            public void onServiceDisconnected(ServiceConnector connector) {
+                serviceIsBound = false;
+            }
+        });
+        printerConnector.connect();
     }
 
     // This is called when a new Loader needs to be created
@@ -243,7 +261,7 @@ public class InventoryExampleActivity extends ListActivity implements LoaderMana
         message = "Price: " + text.getText().toString() + "\nUUID: " + UUID;
 
         // Fetching additional information from the Clover Inventory Service using an AsyncTask
-        if (serviceIsBound && inventoryConnector != null) {
+        if (serviceIsBound && inventoryConnector != null && printerConnector != null) {
             new AccessInventoryService().execute();
         }
 
@@ -293,6 +311,53 @@ public class InventoryExampleActivity extends ListActivity implements LoaderMana
                 } else {
                     information += "None";
                 }
+
+                Printer firstOrderPriner = null;
+                for(Printer printer: printerConnector.getPrinters()){
+                    if(printer.category == Category.ORDER){
+                        firstOrderPriner = printer;
+                        break;
+                    }
+                }
+
+                if(firstOrderPriner != null){
+                    information += "\nOrder Printers for tags on this item: ";
+
+                    // BUG: getTagsForPrinter never returns any tags.
+                    //-------------Steps to repro------------------
+                    // 1. Assign one or more tags to an item.
+                    // 2. Create an Order or Receipt Printer in the Printers app.
+                    // 3. Under the Labels to Auto-Print section, check the tags from step 1.
+                    // 4. Run the app and choose the item from step 1.
+                    //---------------------------------------------
+                    // Result: No tags are ever retrieved for this printer.
+                    // Desired behavior: Tags are returned here, as they are in the Printers app to determine what should be checked
+                    // Notes: Tag#getPrinters() returns null. This dates to at least 2018
+                    // https://community.clover.com/questions/13057/how-to-get-list-of-lables-connected-to-the-printer.html
+                    // so obviously won't be fixed.
+                    List<Tag> tagsForPrinter = inventoryConnector.getTagsForPrinter(firstOrderPriner.uuid);
+
+                    if (!tagsForPrinter.isEmpty() && !tags.isEmpty()) {
+                        boolean printerForTagFound = false;
+                        loop: for (Tag printerTag : tagsForPrinter) {
+                            for(Tag t : tags) {
+                                if(t.getId().equals(printerTag.getId())){
+                                    information += firstOrderPriner.uuid + " ";
+                                    printerForTagFound = true;
+                                    break loop;
+                                }
+                            }
+                        }
+
+                        if(!printerForTagFound){
+                            information += "None";
+                        }
+                    } else {
+                        information += "None";
+                    }
+                }
+
+
             } catch (ForbiddenException e) {
                 Log.e(TAG, "Auth Exception", e);
             } catch (ClientException e) {
